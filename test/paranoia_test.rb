@@ -40,7 +40,8 @@ def setup!
     'namespaced_paranoid_belongs_tos' => 'deleted_at DATETIME, paranoid_has_one_id INTEGER',
     'unparanoid_unique_models' => 'name VARCHAR(32), paranoid_with_unparanoids_id INTEGER',
     'active_column_models' => 'deleted_at DATETIME, active BOOLEAN',
-    'active_column_model_with_uniqueness_validations' => 'name VARCHAR(32), deleted_at DATETIME, active BOOLEAN'
+    'active_column_model_with_uniqueness_validations' => 'name VARCHAR(32), deleted_at DATETIME, active BOOLEAN',
+    'without_default_scope_models' => 'deleted_at DATETIME'
   }.each do |table_name, columns_as_sql_string|
     ActiveRecord::Base.connection.execute "CREATE TABLE #{table_name} (id INTEGER NOT NULL PRIMARY KEY, #{columns_as_sql_string})"
   end
@@ -56,8 +57,15 @@ setup!
 
 class ParanoiaTest < test_framework
   def setup
-    ActiveRecord::Base.connection.tables.each do |table|
-      ActiveRecord::Base.connection.execute "DELETE FROM #{table}"
+    connection = ActiveRecord::Base.connection
+    cleaner = ->(source) {
+      ActiveRecord::Base.connection.execute "DELETE FROM #{source}"
+    }
+
+    if ActiveRecord::VERSION::MAJOR < 5
+      connection.tables.each(&cleaner)
+    else
+      connection.data_sources.each(&cleaner)
     end
   end
 
@@ -178,8 +186,10 @@ class ParanoiaTest < test_framework
     assert_equal 0, parent1.paranoid_models.count
     assert_equal 1, parent1.paranoid_models.only_deleted.count
     assert_equal 1, parent1.paranoid_models.deleted.count
+    assert_equal 0, parent1.paranoid_models.without_deleted.count
     p3 = ParanoidModel.create(:parent_model => parent1)
     assert_equal 2, parent1.paranoid_models.with_deleted.count
+    assert_equal 1, parent1.paranoid_models.without_deleted.count
     assert_equal [p1,p3], parent1.paranoid_models.with_deleted
   end
 
@@ -202,6 +212,14 @@ class ParanoiaTest < test_framework
 
   def test_default_sentinel_value
     assert_equal nil, ParanoidModel.paranoia_sentinel_value
+  end
+
+  def test_without_default_scope_option
+    model = WithoutDefaultScopeModel.create
+    model.destroy
+    assert_equal 1, model.class.count
+    assert_equal 1, model.class.only_deleted.count
+    assert_equal 0, model.class.where(deleted_at: nil).count
   end
 
   def test_active_column_model
@@ -283,8 +301,7 @@ class ParanoiaTest < test_framework
   # Regression test for #24
   def test_chaining_for_paranoid_models
     scope = FeaturefulModel.where(:name => "foo").only_deleted
-    assert_equal "foo", scope.where_values_hash['name']
-    assert_equal 2, scope.where_values.count
+    assert_equal({'name' => "foo"}, scope.where_values_hash)
   end
 
   def test_only_destroyed_scope_for_paranoid_models
@@ -383,9 +400,9 @@ class ParanoiaTest < test_framework
     # Just to demonstrate the AR behaviour
     model = NonParanoidModel.new
     model.destroy!
-    assert model.really_destroyed?
+    assert model.destroyed?
     model.destroy!
-    assert model.really_destroyed?
+    assert model.destroyed?
 
     # Mirrors behaviour above
     model = ParanoidModel.new
@@ -762,7 +779,7 @@ class ParanoiaTest < test_framework
     parent1 = ParentModel.create
     pt1 = ParanoidModelWithTimestamp.create(:parent_model => parent1)
     ParanoidModelWithTimestamp.record_timestamps = false
-    pt1.update_columns(created_at: 20.years.ago, updated_at: 10.years.ago, deleted_at: 10.years.ago) 
+    pt1.update_columns(created_at: 20.years.ago, updated_at: 10.years.ago, deleted_at: 10.years.ago)
     ParanoidModelWithTimestamp.record_timestamps = true
     assert pt1.updated_at < 10.minutes.ago
     refute pt1.deleted_at.nil?
@@ -948,7 +965,13 @@ class FailCallbackModel < ActiveRecord::Base
   belongs_to :parent_model
   acts_as_paranoid
 
-  before_destroy { |_| false }
+  before_destroy { |_|
+    if ActiveRecord::VERSION::MAJOR < 5
+      false
+    else
+      throw :abort
+    end
+  }
 end
 
 class FeaturefulModel < ActiveRecord::Base
@@ -1040,6 +1063,10 @@ end
 
 class CustomSentinelModel < ActiveRecord::Base
   acts_as_paranoid sentinel_value: DateTime.new(0)
+end
+
+class WithoutDefaultScopeModel < ActiveRecord::Base
+  acts_as_paranoid without_default_scope: true
 end
 
 class ActiveColumnModel < ActiveRecord::Base
